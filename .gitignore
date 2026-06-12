@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+*.session
+*.session-journal
+*.sqlite3
+*_token_report.json
+
+data/
