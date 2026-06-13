@@ -1,185 +1,95 @@
 # Digestibly
 
-Личный бот: ежедневный дайджест постов из **всех** broadcast-каналов вашего Telegram-аккаунта.
+Personal Telegram digest bot: collects yesterday's posts from all broadcast channels on your account, groups them into macro themes, summarizes with Gemini (Groq fallback), and sends a daily digest to one owner.
 
-- **Сбор:** Telethon (вчерашний календарный день, до 50 постов/канал)
-- **Темы:** ИИ-классификация + `/move` + keyword fallback
-- **Суммаризация:** двухэтапный пайплайн на **Gemini 2.5 Flash**
-- **Доставка:** Aiogram → TOP-5 по теме, отдельное сообщение на тему
+## Requirements
 
-## Документация
+- [uv](https://docs.astral.sh/uv/)
+- Telegram API credentials ([my.telegram.org](https://my.telegram.org))
+- Bot token ([@BotFather](https://t.me/BotFather))
+- Gemini API key ([Google AI Studio](https://aistudio.google.com))
+- Optional: `GROQ_API_KEY` for fallback when Gemini limits are hit
 
-- **[AGENTS.md](AGENTS.md)** — гид для AI-ассистентов
-- [docs/architecture.md](docs/architecture.md) — модули и слои
-- [docs/pipeline.md](docs/pipeline.md) — двухэтапный пайплайн
-- [docs/configuration.md](docs/configuration.md) — переменные окружения
-- [docs/data.md](docs/data.md) — SQLite, CSV, сессия
-- [docs/scripts.md](docs/scripts.md) — CLI-утилиты
-
----
-
-## Установка и запуск
-
-### 1. Установить [uv](https://docs.astral.sh/uv/)
+## Setup
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### 2. Клонировать проект и настроить окружение
-
-```bash
+git clone git@github.com:mikeshipsai/digestibly.git
 cd digestibly
-cp .env.example .env
-# заполнить .env (см. таблицу ниже)
+cp .env.example .env   # fill in secrets
 make install
+make login             # one-time Telethon auth → data/telegram_digest_userbot.session
+make bot               # local dev (foreground)
 ```
 
-`make install` (= `uv sync`) создаёт `.venv` и ставит зависимости из `pyproject.toml`.
+### Required `.env` variables
 
-### 3. Заполнить `.env`
+| Variable | Description |
+|----------|-------------|
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_PHONE` | Telethon userbot |
+| `TELEGRAM_PASSWORD` | 2FA password (if enabled) |
+| `BOT_TOKEN` | Aiogram bot token |
+| `OWNER_CHAT_ID` | Your Telegram user ID |
+| `GEMINI_API_KEY` | LLM summarization |
 
-| Переменная | Где взять |
-|------------|-----------|
-| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | [my.telegram.org](https://my.telegram.org) |
-| `TELEGRAM_PHONE` | Номер аккаунта с подписками на каналы |
-| `TELEGRAM_PASSWORD` | Если включена 2FA |
-| `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) |
-| `OWNER_CHAT_ID` | Ваш Telegram ID ([@userinfobot](https://t.me/userinfobot)) |
-| `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com) |
+## Production (24/7)
 
-### 4. Авторизовать Telethon (один раз)
+Run via systemd on a VPS:
 
 ```bash
-make login
+cd /opt/tg_summarizator
+uv sync
+systemctl enable --now tg-summarizator
+journalctl -u tg-summarizator -f
 ```
 
-Создаётся `data/telegram_digest_userbot.session`.
+Service unit example:
 
-### 5. Запустить бота
+```ini
+[Service]
+WorkingDirectory=/opt/tg_summarizator
+ExecStart=/root/.local/bin/uv run python -m app.main
+Restart=always
+```
+
+## Schedule
+
+Default (override via `/start` or `/set_schedule`):
+
+- **04:00** — night batch: collect + summarize all posts
+- **09:00** — morning digest: top-5 per theme + TOC with inline buttons
+
+Timezone: `TIMEZONE` in `.env` (default `Europe/Moscow`).
+
+## Bot commands
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Set digest time (onboarding) |
+| `/digest` | Run full pipeline now |
+| `/mute @channel` | Hide channel from digest |
+| `/unmute @channel` | Restore channel |
+| `/status` | Last runs and schedule |
+
+Hidden owner commands: `/batch`, `/set_schedule`, `/move`, `/themes`.
+
+## Manual pipeline
 
 ```bash
-make bot
+uv run python -m scripts.run_digest --no-send          # full pipeline, no Telegram
+uv run python -m scripts.run_digest --batch-only       # collect + summarize only
+uv run python -m scripts.run_digest --morning-only     # send from last batch
 ```
-
-По расписанию: **batch 04:00**, **digest 09:00** (`TIMEZONE`). Команды — в Telegram у бота.
-
----
-
-## Тестирование по шагам
-
-Все команды ниже используют `uv run` через Makefile. Альтернатива: `uv run python -m ...`.
-
-### Шаг 1 — только сбор (без LLM)
-
-```bash
-make test-collect
-```
-
-Проверяет Telethon, каналы, SQLite. Результат: `data/debug_posts.sqlite3`, `data/token_report.json`.
-
-### Шаг 2 — ночной batch (сбор + саммари всех постов)
-
-```bash
-uv run python -m scripts.run_digest --batch-only --no-send
-```
-
-Проверка:
-
-```bash
-sqlite3 data/debug_posts.sqlite3 "SELECT COUNT(*) FROM post_summaries_all;"
-```
-
-### Шаг 3 — утренний дайджест (TOP-5, без отправки)
-
-```bash
-uv run python -m scripts.run_digest --morning-only --no-send
-```
-
-В консоли — preview дайджеста.
-
-### Шаг 4 — полный пайплайн без Telegram
-
-```bash
-make run-digest
-```
-
-### Шаг 5 — полный пайплайн с отправкой
-
-Напишите боту `/start`, затем:
-
-```bash
-uv run python -m scripts.run_digest
-```
-
-### Шаг 6 — через команды бота
-
-```bash
-make bot
-```
-
-| Команда | Действие |
-|---------|----------|
-| `/status` | Расписание и последние запуски |
-| `/batch` | Ночной этап вручную |
-| `/digest` | Полный пайплайн |
-| `/set_schedule digest 09:00` | Время отправки |
-| `/set_schedule batch 04:00` | Время batch |
-| `/move @channel Тема` | Переопределить тему |
-| `/create_theme Название` | Личная тема |
-| `/themes` | Список тем |
-
-### Если Gemini недоступен
-
-Добавьте `GROQ_API_KEY` в `.env` — пайплайн автоматически переключится на Groq (`qwen/qwen3-32b`).
-Без ключа Groq при исчерпании лимита Gemini дайджест завершится с ошибкой.
-
-### Сброс данных
-
-```bash
-make clean-db
-```
-
----
 
 ## Docker
 
 ```bash
-make init-auth   # Telethon в контейнере (один раз)
+make init-auth   # Telethon login in container (once)
 make up
 make logs
 ```
 
----
+## Data
 
-## Make-команды
+Runtime files live in `data/` (gitignored): SQLite DB, Telethon session, channel cache.
 
-```bash
-make help
-make install          # uv sync
-make login            # Telethon auth
-make bot              # запуск бота
-make test-collect
-make run-digest
-make export-channels
-make recluster-channels
-make preview-clusters
-make up / down / clean-db
-```
-
-## Структура `app/`
-
-```
-app/
-  main.py
-  pipeline/          # digest, format, scoring, themes_merge
-  telegram/          # Telethon + Aiogram
-  channels/          # cluster, ai_cluster, resolve, preprocess
-  llm/               # gemini_client, summarizer, token_estimate
-  storage/           # posts, summaries, settings, themes
-  scheduling/
-  core/
-  runtime/
-```
-
-Данные в `data/` — в `.gitignore`.
+Do not run the bot on two machines with the same session file.

@@ -16,6 +16,7 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -53,6 +54,7 @@ _last_batch_provider: Optional[Callable[[], Optional[datetime]]] = None
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 _CACHE_TTL_SEC = 86_400
 _EXPAND_PREFIX = "exp:"
+_TOC_PREFIX = "toc:"
 _ONBOARD_PREFIX = "ob:"
 
 
@@ -115,6 +117,22 @@ def init_bot() -> Bot:
     return _bot
 
 
+_BOT_COMMANDS: tuple[BotCommand, ...] = (
+    BotCommand(command="start", description="Настроить время дайджеста"),
+    BotCommand(command="help", description="Справка по боту"),
+    BotCommand(command="mute", description="Скрыть канал — /mute @channel"),
+    BotCommand(command="unmute", description="Вернуть канал — /unmute @channel"),
+    BotCommand(command="digest", description="Получить дайджест сейчас"),
+    BotCommand(command="set_schedule", description="Изменить время — /set_schedule digest 09:00"),
+    BotCommand(command="status", description="Статус и расписание"),
+)
+
+
+async def setup_bot_commands() -> None:
+    """Register /command hints shown when typing in chat."""
+    await init_bot().set_my_commands(list(_BOT_COMMANDS))
+
+
 def _prune_digest_cache() -> None:
     now = time.time()
     expired = [key for key, entry in _digest_cache.items() if now - entry.created_at > _CACHE_TTL_SEC]
@@ -142,11 +160,19 @@ def _store_digest_cache(
     return token
 
 
-def _button_label(category: str, count: int) -> str:
-    label = f"📂 {category} ({count})"
+def _button_label(category: str) -> str:
+    label = f"📂 {category}"
     if len(label) > 64:
         return f"{label[:61]}..."
     return label
+
+
+def _back_to_toc_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="← К темам", callback_data=f"{_TOC_PREFIX}{token}")]
+        ]
+    )
 
 
 def _onboarding_keyboard() -> InlineKeyboardMarkup:
@@ -175,11 +201,10 @@ def _build_toc_keyboard(
     categories = [c for c in sorted(summaries_by_category) if summaries_by_category[c]]
     rows: list[list[InlineKeyboardButton]] = []
     for idx, category in enumerate(categories):
-        count = len(summaries_by_category[category])
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=_button_label(category, count),
+                    text=_button_label(category),
                     callback_data=f"{_EXPAND_PREFIX}{token}:{idx}",
                 )
             ]
@@ -276,17 +301,28 @@ async def send_digest_by_category(
     await _send_text(chat_id, text, reply_markup=keyboard)
 
 
+async def _send_category_digest(
+    chat_id: int,
+    category: str,
+    items: list[PostSummary],
+    *,
+    toc_token: str | None = None,
+) -> None:
+    """Send one theme digest as a single message."""
+    text = format_category_digest(category, items)
+    if not text:
+        return
+    back_markup = _back_to_toc_keyboard(toc_token) if toc_token else None
+    await _send_text(chat_id, text, disable_notification=True, reply_markup=back_markup)
+
+
 async def send_single_category_digest(
     category: str,
     items: list[PostSummary],
     chat_id: int,
 ) -> None:
     """Send one theme digest directly (for /digest_theme)."""
-    settings = get_settings()
-    digest_date = digest_target_date(settings.timezone)
-    text = format_category_digest(category, items, digest_date=digest_date)
-    if text:
-        await _send_text(chat_id, text)
+    await _send_category_digest(chat_id, category, items)
 
 
 def _parse_time(value: str) -> tuple[int, int]:
@@ -612,9 +648,39 @@ async def expand_theme_callback(callback: CallbackQuery) -> None:
         await callback.answer("В теме нет постов", show_alert=True)
         return
 
-    text = format_category_digest(category, items, digest_date=entry.digest_date)
     await callback.answer()
-    await _send_text(callback.message.chat.id, text, disable_notification=True)
+    await _send_category_digest(
+        callback.message.chat.id,
+        category,
+        items,
+        toc_token=token,
+    )
+
+
+@_router.callback_query(F.data.startswith(_TOC_PREFIX))
+async def back_to_toc_callback(callback: CallbackQuery) -> None:
+    if not _is_owner_callback(callback):
+        await callback.answer()
+        return
+    if callback.message is None or callback.data is None:
+        await callback.answer()
+        return
+
+    token = callback.data[len(_TOC_PREFIX) :]
+    entry = _digest_cache.get(token)
+    if entry is None:
+        await callback.answer("Дайджест устарел. Запустите /digest снова.", show_alert=True)
+        return
+
+    text = format_digest_toc(entry.digest_date, entry.summaries)
+    keyboard = _build_toc_keyboard(token, entry.summaries)
+    await callback.answer()
+    await _send_text(
+        callback.message.chat.id,
+        text,
+        disable_notification=True,
+        reply_markup=keyboard,
+    )
 
 
 @_router.callback_query(F.data.startswith(_ONBOARD_PREFIX))

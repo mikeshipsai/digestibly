@@ -25,6 +25,7 @@ async def start() -> None:
 
     await start_userbot()
     bot.init_bot()
+    await bot.setup_bot_commands()
     dispatcher = bot.create_dispatcher()
     bot.configure_handlers(
         run_digest_handler=run_digest,

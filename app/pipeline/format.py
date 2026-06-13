@@ -46,11 +46,13 @@ def format_digest_date(value: date) -> str:
 
 
 def _format_channel(channel: str) -> str:
+    """Plain channel title without @username suffix."""
     channel = channel.strip()
     if not channel:
         return ""
-    if not channel.startswith("@"):
-        channel = f"@{channel.lstrip('@')}"
+    if "(@" in channel:
+        channel = channel.rsplit(" (@", 1)[0].strip()
+    channel = channel.lstrip("@")
     return _escape_html(channel)
 
 
@@ -75,15 +77,11 @@ def format_post_card(item: PostSummary) -> str:
 def format_category_digest(
     category: str,
     items: list[PostSummary],
-    *,
-    digest_date: date | None = None,
 ) -> str:
     """One message per theme with top posts."""
     if not items:
         return ""
     parts: list[str] = [f"<b>{_escape_html(category)}</b>"]
-    if digest_date is not None:
-        parts.append(f"<i>Дайджест за {format_digest_date(digest_date)}</i>")
     for item in sorted(items, key=lambda x: x.rank):
         parts.append(format_post_card(item))
     return "\n\n".join(parts).strip()
@@ -105,9 +103,6 @@ def format_digest_toc(
         "",
         "Нажмите тему, чтобы развернуть:",
     ]
-    for category in categories:
-        count = len(summaries_by_category[category])
-        lines.append(f"• {_escape_html(category)} ({count})")
     return "\n".join(lines)
 
 
